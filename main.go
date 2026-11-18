@@ -106,6 +106,7 @@ func main() {
 	}
 
 	hub := NewHub(reg, "data/tasks.json")
+	startAt := time.Now()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +124,44 @@ func main() {
 			URL: "http://" + hubAddr, Version: "1.0.0", ProtocolVersion: "0.2.0",
 			DefaultInputModes: []string{"text"}, DefaultOutputModes: []string{"text", "data", "artifact"},
 			Skills: []Skill{{ID: "helpdesk", Name: "服务台编排", Description: "按现象编排多个 agent", Tags: []string{"编排", "路由"}}},
+		})
+	})
+
+	// 健康检查：只回答"进程活着、下游几个是通的、任务积压多少"，
+	// 不做重活（不落盘、不调下游），保证被高频轮询也不会拖慢主链路
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		agents := reg.All()
+		healthy := 0
+		names := make([]string, 0, len(agents))
+		for _, a := range agents {
+			if a.Healthy {
+				healthy++
+			} else {
+				names = append(names, a.Card.Name)
+			}
+		}
+		tasks := hub.List()
+		running := 0
+		for _, t := range tasks {
+			if t.Status.State == "working" {
+				running++
+			}
+		}
+		status := "ok"
+		code := 200
+		if healthy == 0 || len(agents) == 0 {
+			status = "degraded" // 一个下游都不通，网关接单也没意义
+			code = 503
+		}
+		jsonOut(w, code, map[string]any{
+			"status":      status,
+			"uptimeSec":   int(time.Since(startAt).Seconds()),
+			"agentsTotal": len(agents),
+			"agentsUp":    healthy,
+			"agentsDown":  names,
+			"tasksTotal":  len(tasks),
+			"tasksRunning": running,
+			"version":     "1.0.0",
 		})
 	})
 

@@ -73,6 +73,15 @@ go build -o agenthub.exe .
 | 重复提交同一 messageId | 幂等命中，返回同一 taskId，未重复执行 |
 | SSE 订阅 | 依次收到 `working` ×5 → `completed`，与状态机一致 |
 | `POST /api/crash` 后重启 | 3 条任务全部恢复，幂等索引仍生效 |
+| `GET /healthz` | 200 `{"status":"ok","agentsUp":3,"agentsTotal":3,"tasksTotal":5,"uptimeSec":6}` |
+
+`/healthz` 是给进程管理器和巡检脚本用的：只回答「进程活着、几个下游是通的、任务积压多少」，
+不落盘也不调下游，高频轮询不会拖慢主链路。**一个下游都不通时返回 503 + `status:degraded`** ——
+网关接单也编排不动，这种状态让上游直接熔断比返回 200 更有用：
+
+```bash
+curl -s http://127.0.0.1:18090/healthz
+```
 
 ## 目录
 
