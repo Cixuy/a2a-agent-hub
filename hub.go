@@ -285,12 +285,10 @@ func planFor(text string) []string {
 }
 
 // Send 是 message/send 的落点：建任务、按意图编排、逐跳调用下游 agent。
+// 幂等必须在同一把锁里完成"查 byMsgID + 建任务 + 登记 byMsgID"：
+// 以前先加读锁查、解锁后再加写锁插入，两个同 messageId 的并发请求会双双查空，
+// 各建一个任务，下游 agent 被调两遍（配额双扣、工单重复）。
 func (h *Hub) Send(mid string, msg Message, ctxID string) (*Task, bool) {
-	if mid != "" {
-		if t := h.ByMessageID(mid); t != nil {
-			return t, true // 幂等：同一个 messageId 不重复执行
-		}
-	}
 	text := ""
 	for _, p := range msg.Parts {
 		if p.Kind == "text" {
@@ -307,6 +305,14 @@ func (h *Hub) Send(mid string, msg Message, ctxID string) (*Task, bool) {
 		MessageID: mid,
 	}
 	h.mu.Lock()
+	if mid != "" {
+		if id, ok := h.byMsgID[mid]; ok {
+			if old := h.tasks[id]; old != nil {
+				h.mu.Unlock()
+				return old, true // 幂等：同一个 messageId 不重复执行
+			}
+		}
+	}
 	h.tasks[t.ID] = t
 	if mid != "" {
 		h.byMsgID[mid] = t.ID
