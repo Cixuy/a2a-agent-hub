@@ -20,6 +20,23 @@ type Agent struct {
 	Healthy  bool
 	LastSeen time.Time
 	Quota    *bucket
+
+	mu sync.Mutex // 只保护下面两个字段：每次调用都会改写，而 /healthz 会被并发轮询
+}
+
+func (a *Agent) healthy() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Healthy
+}
+
+func (a *Agent) setHealthy(ok bool) {
+	a.mu.Lock()
+	a.Healthy = ok
+	if ok {
+		a.LastSeen = time.Now()
+	}
+	a.mu.Unlock()
 }
 
 type Registry struct {
@@ -194,6 +211,31 @@ func (h *Hub) Get(id string) *Task {
 	return h.tasks[id]
 }
 
+// clone 给 HTTP / SSE 侧一份可安全序列化的快照（切片一起复制），
+// 否则 json 边编码、worker 边 append Hops / 改 Status。
+func (t *Task) clone() *Task {
+	d := *t
+	d.Artifacts = append([]Artifact(nil), t.Artifacts...)
+	d.History = append([]Message(nil), t.History...)
+	d.Hops = append([]Hop(nil), t.Hops...)
+	if t.Status.Message != nil {
+		m := *t.Status.Message
+		m.Parts = append([]Part(nil), t.Status.Message.Parts...)
+		d.Status.Message = &m
+	}
+	return &d
+}
+
+// Snapshot 是 Get 的只读版本，拿到的副本不会被后台改动，适合直接 json 出去。
+func (h *Hub) Snapshot(id string) *Task {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if t, ok := h.tasks[id]; ok {
+		return t.clone()
+	}
+	return nil
+}
+
 func (h *Hub) ByMessageID(mid string) *Task {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -208,7 +250,7 @@ func (h *Hub) List() []*Task {
 	defer h.mu.RUnlock()
 	out := make([]*Task, 0, len(h.tasks))
 	for _, t := range h.tasks {
-		out = append(out, t)
+		out = append(out, t.clone())
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
 	return out
@@ -241,7 +283,7 @@ func (h *Hub) publish(t *Task) {
 	defer h.mu.RUnlock()
 	for _, ch := range h.subs[t.ID] {
 		select {
-		case ch <- *t:
+		case ch <- *t.clone():
 		default:
 		}
 	}
@@ -446,13 +488,13 @@ func (h *Hub) callAgent(a *Agent, t *Task, text string) ([]Artifact, error) {
 	client := &http.Client{Timeout: h.HopTimeout}
 	resp, err := client.Post(strings.TrimRight(a.URL, "/")+"/a2a", "application/json", bytes.NewReader(raw))
 	if err != nil {
-		a.Healthy = false
+		a.setHealthy(false)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		a.Healthy = false
+		a.setHealthy(false)
 		return nil, fmt.Errorf("agent http %d: %s", resp.StatusCode, truncate(string(data), 120))
 	}
 	var rpc RPCResponse
@@ -471,7 +513,6 @@ func (h *Hub) callAgent(a *Agent, t *Task, text string) ([]Artifact, error) {
 	if len(out.Artifacts) == 0 {
 		return nil, fmt.Errorf("下游没有返回结果")
 	}
-	a.Healthy = true
-	a.LastSeen = time.Now()
+	a.setHealthy(true)
 	return out.Artifacts, nil
 }

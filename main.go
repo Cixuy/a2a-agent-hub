@@ -134,7 +134,7 @@ func main() {
 		healthy := 0
 		names := make([]string, 0, len(agents))
 		for _, a := range agents {
-			if a.Healthy {
+			if a.healthy() {
 				healthy++
 			} else {
 				names = append(names, a.Card.Name)
@@ -179,7 +179,7 @@ func main() {
 			for _, s := range a.Card.Skills {
 				sk = append(sk, s.Name)
 			}
-			out = append(out, row{a.Card.Name, a.URL, sk, a.Healthy, a.Card.Description})
+			out = append(out, row{a.Card.Name, a.URL, sk, a.healthy(), a.Card.Description})
 		}
 		jsonOut(w, 200, out)
 	})
@@ -199,7 +199,8 @@ func main() {
 			return
 		}
 		t, dup := hub.Send(in.MessageID, Message{Role: "user", Parts: []Part{{Kind: "text", Text: in.Text}}}, "ctx-"+shortID())
-		jsonOut(w, 200, map[string]any{"task": t, "duplicated": dup})
+		// t 是后台 d 编排 goroutine 还在改的对象，序列化要用快照
+	jsonOut(w, 200, map[string]any{"task": hub.Snapshot(t.ID), "duplicated": dup})
 	})
 
 	// 演示用：把网关进程直接干掉，重启后任务还在（状态每步落盘）
@@ -219,7 +220,7 @@ func main() {
 			sse(w, r, hub, id)
 			return
 		}
-		if t := hub.Get(rest); t != nil {
+		if t := hub.Snapshot(rest); t != nil {
 			jsonOut(w, 200, t)
 			return
 		}
@@ -241,13 +242,13 @@ func main() {
 				return
 			}
 			t, _ := hub.Send(p.MessageID, p.Message, p.ContextID)
-			writeRPCResult(w, req.ID, t)
+			writeRPCResult(w, req.ID, hub.Snapshot(t.ID))
 		case "tasks/get":
 			var p struct {
 				ID string `json:"id"`
 			}
 			json.Unmarshal(req.Params, &p)
-			if t := hub.Get(p.ID); t != nil {
+			if t := hub.Snapshot(p.ID); t != nil {
 				writeRPCResult(w, req.ID, t)
 			} else {
 				writeRPCError(w, req.ID, -32001, "任务不存在", nil)
@@ -259,7 +260,7 @@ func main() {
 			json.Unmarshal(req.Params, &p)
 			if t := hub.Get(p.ID); t != nil {
 				hub.setState(t, "canceled", "调用方取消")
-				writeRPCResult(w, req.ID, t)
+				writeRPCResult(w, req.ID, hub.Snapshot(p.ID))
 			} else {
 				writeRPCError(w, req.ID, -32001, "任务不存在", nil)
 			}
@@ -276,7 +277,7 @@ func main() {
 }
 
 func sse(w http.ResponseWriter, r *http.Request, hub *Hub, id string) {
-	t := hub.Get(id)
+	t := hub.Snapshot(id)
 	if t == nil {
 		http.Error(w, "no task", 404)
 		return

@@ -83,6 +83,16 @@ go build -o agenthub.exe .
 curl -s http://127.0.0.1:18090/healthz
 ```
 
+并发正确性另有一条自检：任务详情、`/healthz`、SSE 都在读同一份状态，
+用 race 检测器压一遍（边压 `/api/send` 边轮询 `/healthz` 与 `/api/tasks`）应为 0 条告警：
+
+```bash
+go build -race -o /tmp/ahr.exe . && /tmp/ahr.exe &
+for i in $(seq 1 10); do curl -s -X POST http://127.0.0.1:18090/api/send \
+  -d "{\"text\":\"vpn连不上\",\"messageId\":\"r-$i\"}" -o /dev/null & done
+for i in $(seq 1 60); do curl -s http://127.0.0.1:18090/healthz -o /dev/null; done
+```
+
 ## 目录
 
 ```
