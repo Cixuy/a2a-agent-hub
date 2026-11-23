@@ -90,8 +90,10 @@ type RPCResponse struct {
 	Error   *RPCError       `json:"error,omitempty"`
 }
 
-// jsonRawMessage 只是给 json.RawMessage 起个短名字
-type jsonRawMessage = []byte
+// jsonRawMessage 只是给 json.RawMessage 起个短名字。
+// 注意别写成 []byte：那样 params 会被当成 base64 字符串收发，
+// 外部客户端发标准 JSON 对象时整个请求会以 -32700「解析失败」被拒。
+type jsonRawMessage = json.RawMessage
 
 type SendParams struct {
 	Message   Message `json:"message"`
