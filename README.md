@@ -29,7 +29,7 @@
 | 能力发现 | 每个 Agent 暴露 `/.well-known/agent-card.json`，网关启动时拉名片注册 |
 | 任务提交 | `POST /a2a` `message/send`，返回 Task（含 id / status / artifacts） |
 | 任务查询 | `tasks/get` |
-| 任务取消 | `tasks/cancel` |
+| 任务取消 | `tasks/cancel`（只对 submitted/working 生效；已结束的返回 `-32002` 并保留原状态） |
 | 流式更新 | `GET /api/tasks/{id}/events`，SSE 推送任务快照 |
 
 网关自己也是一张名片（`/.well-known/agent-card.json`），可以被更上层的 Agent 当普通 Agent 调。
@@ -41,6 +41,8 @@
 **幂等**：同一个 `messageId` 重复提交，直接返回已有任务，不会重复执行、不会重复建单。索引落盘，重启后依然生效。并发同 `messageId` 也是安全的：查索引、建任务、登记索引在同一把锁内完成，不会出现两条都查空各建一单（并发 20 个同 `messageId` 只出 1 个任务，另 19 个 `duplicated=true`）。
 
 **配额与降级**：每个 Agent 独立令牌桶（默认 60 次/分钟），超额直接拒绝并记一条 `rejected` 的跳，任务标为"部分降级完成"，而不是整体失败。单跳超时 1.2 秒，失败重试一次（配额拒绝不重试）。
+
+**取消**：`tasks/cancel` 只在任务还没结束时生效（submitted / working / input-required），编排 goroutine 每跳前查一次状态，取消后不再调下游，剩下的跳不留下 hop。已经 completed / failed 的任务再取消返回 `-32002`，原状态保持不变——否则"取消"会把"已经做完了"抹成"被取消"。
 
 **审计**：每次跨 Agent 调用记一条 hop：谁调的、哪个技能、耗时多少、第几次尝试、产出是什么。界面上的瀑布图就是这些数据。
 

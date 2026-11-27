@@ -379,6 +379,9 @@ func (h *Hub) run(t *Task, text string) {
 	failed := 0
 
 	for _, skillWant := range chain {
+		if h.isCanceled(t) {
+			return // 调用方已取消，剩下的跳不再调下游
+		}
 		agent := h.pickAgent(skillWant)
 		seq++
 		hop := Hop{Seq: seq, Agent: "-", Skill: skillWant, State: "failed", Attempt: 1}
@@ -433,6 +436,9 @@ func (h *Hub) run(t *Task, text string) {
 		h.publish(t)
 	}
 
+	if h.isCanceled(t) {
+		return // 最后一跳跑完时任务已被取消，别把 canceled 覆盖成 completed
+	}
 	if failed == len(chain) {
 		h.setState(t, "failed", "所有下游 agent 都没能完成")
 		return
@@ -442,6 +448,41 @@ func (h *Hub) run(t *Task, text string) {
 		note = fmt.Sprintf("部分降级完成（%d/%d 跳失败），结论仅基于成功的那部分", failed, len(chain))
 	}
 	h.setState(t, "completed", note)
+}
+
+// Cancel 只在任务还没结束时生效。已完成/失败/已取消的任务原样返回，不再改写：
+// 旧实现无脑 setState("canceled")，取消一个跑完的任务会把"做完了"这个事实抹掉。
+func (h *Hub) Cancel(id string) (*Task, string) {
+	h.mu.Lock()
+	t, ok := h.tasks[id]
+	if !ok {
+		h.mu.Unlock()
+		return nil, "not_found"
+	}
+	switch t.Status.State {
+	case "submitted", "working", "input-required": // 还能取消
+	default:
+		snap := t.clone()
+		h.mu.Unlock()
+		return snap, "already_finished"
+	}
+	t.Status.State = "canceled"
+	t.Status.Timestamp = now()
+	t.UpdatedAt = now()
+	t.Status.Message = &Message{Role: "agent", Parts: []Part{{Kind: "text", Text: "调用方取消"}}}
+	snap := t.clone()
+	h.mu.Unlock()
+	h.touch()
+	h.publish(t)
+	return snap, ""
+}
+
+// isCanceled 给编排 goroutine 用：每跳前查一次。不查的话取消只改了状态字段，
+// worker 照旧跑完最后一跳，再把状态写回 completed，取消等于没做。
+func (h *Hub) isCanceled(t *Task) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return t.Status.State == "canceled"
 }
 
 func (h *Hub) appendHop(t *Task, hop Hop) {

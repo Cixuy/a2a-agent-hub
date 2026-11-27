@@ -258,11 +258,14 @@ func main() {
 				ID string `json:"id"`
 			}
 			json.Unmarshal(req.Params, &p)
-			if t := hub.Get(p.ID); t != nil {
-				hub.setState(t, "canceled", "调用方取消")
-				writeRPCResult(w, req.ID, hub.Snapshot(p.ID))
-			} else {
+			t, why := hub.Cancel(p.ID)
+			switch why {
+			case "not_found":
 				writeRPCError(w, req.ID, -32001, "任务不存在", nil)
+			case "already_finished":
+				writeRPCError(w, req.ID, -32002, "任务已结束，不能再取消", t)
+			default:
+				writeRPCResult(w, req.ID, t)
 			}
 		default:
 			writeRPCError(w, req.ID, -32601, "不支持的方法："+req.Method, nil)
